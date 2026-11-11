@@ -1,0 +1,3 @@
+﻿game_id,opening_seed,ai_side0,ai_side1,winner_side,winner_ai,total_plies,avg_move_ms,total_bfs_calls,total_evaluations,total_search_nodes,timeouts
+1,42,minimax2,minimax2_ab,draw,draw,40,41.459,21302,12912,10928,0
+2,42,minimax2_ab,minimax2,draw,draw,40,39.884,21847,13526,11542,0
