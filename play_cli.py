@@ -1,10 +1,8 @@
-"""Simple terminal play mode. No external dependencies or server needed.
+"""Play human vs Quoridor AI in a terminal; 0-based coordinates.
 
-Run: python play_cli.py --ai minimax2_ab --human-side 0
-     python play_cli.py --ai minimax3_ab --reply-k 4
-
-Commands: p ROW COL | w ROW COL h | w ROW COL v | quit
-Rows and columns start at 0.
+Examples:
+  python play_cli.py --ai minimax2_ab
+  python play_cli.py --ai minimax3_ab --time-limit 0.2 --reply-k 4
 """
 from __future__ import annotations
 
@@ -15,70 +13,70 @@ from quoridor_engine import Action, Rules, State, _bit, start_state, winner
 
 
 def pretty_board(state: State) -> str:
-    grid = [[" " for _ in range(17)] for _ in range(17)]
+    grid = [[' ' for _ in range(17)] for _ in range(17)]
     for r in range(9):
         for c in range(9):
-            grid[2*r][2*c] = "."
+            grid[2*r][2*c] = '.'
     for r in range(8):
         for c in range(8):
             if state.horizontal & _bit(r, c):
                 for x in (2*c, 2*c+1, 2*c+2):
-                    grid[2*r+1][x] = "="
+                    grid[2*r+1][x] = '='
             if state.vertical & _bit(r, c):
                 for y in (2*r, 2*r+1, 2*r+2):
-                    grid[y][2*c+1] = "|"
+                    grid[y][2*c+1] = '|'
     for side, (r, c) in enumerate(state.pawns):
-        grid[2*r][2*c] = "A" if side == 0 else "B"
-    return "\n".join("".join(row) for row in grid)
+        grid[2*r][2*c] = 'A' if side == 0 else 'B'
+    return '\n'.join(''.join(row) for row in grid)
 
 
-def parse_action(text: str) -> Action:
-    tokens = text.strip().lower().split()
-    if len(tokens) == 3 and tokens[0] in ("p", "pawn", "move"):
-        return Action("pawn", int(tokens[1]), int(tokens[2]))
-    if len(tokens) == 4 and tokens[0] in ("w", "wall"):
-        return Action("wall", int(tokens[1]), int(tokens[2]), tokens[3])
-    raise ValueError("Use: p ROW COL  or  w ROW COL h/v  or  quit")
+def parse_action(value: str) -> Action:
+    pieces = value.strip().lower().split()
+    if len(pieces) == 3 and pieces[0] in ('p', 'pawn', 'move'):
+        return Action('pawn', int(pieces[1]), int(pieces[2]))
+    if len(pieces) == 4 and pieces[0] in ('w', 'wall'):
+        return Action('wall', int(pieces[1]), int(pieces[2]), pieces[3])
+    raise ValueError('Use p ROW COL or w ROW COL h/v or quit')
 
 
 def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--ai", choices=tuple(MODES), default="minimax2_ab")
-    parser.add_argument("--human-side", type=int, choices=(0, 1), default=0)
-    parser.add_argument("--reply-k", type=int, default=4)
-    parser.add_argument("--time-limit", type=float, default=None)
-    args = parser.parse_args()
-    ai = Agent(Options(mode=args.ai, root_top_k=8, wall_margin=2,
-                       reply_top_k=args.reply_k if args.ai == "minimax3_ab" else None,
+    p = argparse.ArgumentParser(description=__doc__)
+    p.add_argument('--ai', choices=tuple(MODES), default='minimax2_ab')
+    p.add_argument('--human-side', choices=(0, 1), type=int, default=0)
+    p.add_argument('--root-k', type=int, default=8)
+    p.add_argument('--reply-k', type=int, default=4)
+    p.add_argument('--margin', type=int, default=2)
+    p.add_argument('--time-limit', type=float, default=None)
+    args = p.parse_args()
+    ai = Agent(Options(mode=args.ai, root_top_k=args.root_k,
+                       reply_top_k=args.reply_k, wall_margin=args.margin,
                        time_limit_s=args.time_limit,
-                       iterative_deepening=bool(args.time_limit)))
-    rules = Rules()
-    s = start_state()
-    print("Side A (0) moves from row 0 to row 8; Side B (1) moves to row 0.")
-    print("Examples: p 1 4  |  w 2 4 h  |  quit")
-    for turn_number in range(201):
-        print("\n" + pretty_board(s))
-        print(f"ply={turn_number}, turn={'A' if s.turn == 0 else 'B'}, walls={s.remaining}")
-        if winner(s) is not None:
-            print(f"Winner: {'A' if winner(s) == 0 else 'B'}")
+                       iterative_deepening=args.time_limit is not None))
+    rules, state = Rules(), start_state()
+    print('Player A (0) moves from row 0 to row 8; Player B (1) to row 0.')
+    print('Moves: p 1 4   or   w 2 4 h   or   quit')
+    for ply in range(201):
+        print('\n' + pretty_board(state))
+        print(f'Ply {ply}, turn {state.turn}, remaining walls {state.remaining}')
+        if winner(state) is not None:
+            print(f'Winner: {winner(state)}')
             return
-        if s.turn == args.human_side:
-            raw = input("Your action> ").strip()
-            if raw.lower() in ("quit", "q", "exit"):
+        if state.turn == args.human_side:
+            raw = input('Your action> ').strip()
+            if raw.lower() in ('quit', 'q', 'exit'):
                 return
             try:
-                action = parse_action(raw)
-                s = rules.apply(s, action)
-            except (ValueError, IndexError) as e:
-                print(f"Invalid action: {e}")
+                state = rules.apply(state, parse_action(raw))
+            except ValueError as e:
+                print(f'Illegal action: {e}')
         else:
-            choice = ai.choose(s)
-            print(f"AI: {choice.action} | depth={choice.stats.completed_depth}, "
-                  f"ms={choice.stats.elapsed_ms:.2f}, "
-                  f"nodes={choice.stats.nodes}, cutoff={choice.stats.cutoffs}")
-            s = rules.apply(s, choice.action)
-    print("Stopped at 200 plies (demo limit).")
+            result = ai.choose(state)
+            st = result.stats
+            print(f'AI plays {result.action} | completed depth={st.completed_depth}, '
+                  f'time={st.elapsed_ms:.1f} ms, nodes={st.nodes}')
+            state = rules.apply(state, result.action)
+    print('Stopped after 200 ply demo cap.')
 
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     main()

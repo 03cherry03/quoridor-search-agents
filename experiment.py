@@ -1,25 +1,19 @@
-"""Paired AI-vs-AI tournament for Quoridor course project.
+"""Refereed AI vs AI games with paired openings and PDF-defined margins.
 
-Examples:
-  python experiment.py --a minimax2 --b minimax2_ab --pairs 4
-  python experiment.py --a greedy --b minimax2_ab --pairs 10 --max-plies 120
-  python experiment.py --a minimax2_ab --b minimax3_ab --pairs 2 --reply-k 4
-
-The max-ply cap is an EXPERIMENTAL draw rule (not an official Quoridor rule).
+The wall/pawn game engine is local: this does NOT change the team's web server.
+Game-level 0.25 s limit is a *measured forfeit rule*, not an OS preemption.
 """
 from __future__ import annotations
 
 import argparse
 import csv
-import os
 import random
-from collections import Counter, defaultdict
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
 from quoridor_ai import Agent, Options, MODES
-from quoridor_engine import Action, Rules, State, start_state, winner
+from quoridor_engine import Rules, State, start_state, winner
 
 
 @dataclass
@@ -30,37 +24,96 @@ class MatchResult:
     ai_side1: str
     winning_side: Optional[int]
     total_plies: int
+    end_state: State
+    finish_reason: str  # 'goal', 'max_plies_draw', 'time_forfeit'
+    fault_side: Optional[int]
     avg_ms: float
     total_bfs: int
     total_evaluations: int
     total_nodes: int
-    timeouts: int
+    timed_search_moves: int
+    matchup: str = ''
 
     @property
     def winning_ai(self) -> str:
         if self.winning_side is None:
-            return "draw"
+            return 'draw'
         return self.ai_side0 if self.winning_side == 0 else self.ai_side1
+
+    @property
+    def margin_side0(self) -> float:
+        """Team PDF: winner margin +loser's remaining BFS distance/8.
+
+        Time win/loss: +1/-1. Max-plies draw: 0. The other side's margin
+        is exactly the negative. Clipping is intentional for distances >8.
+        """
+        if self.winning_side is None:
+            return 0.0
+        if self.finish_reason == 'time_forfeit':
+            return 1.0 if self.winning_side == 0 else -1.0
+        rules = Rules()
+        if self.winning_side == 0:
+            return min(1.0, rules.shortest_path_len(self.end_state, 1) / 8.0)
+        return -min(1.0, rules.shortest_path_len(self.end_state, 0) / 8.0)
+
+    def margin_for(self, name: str) -> float:
+        if name == self.ai_side0:
+            return self.margin_side0
+        if name == self.ai_side1:
+            return -self.margin_side0
+        raise ValueError(f'{name} did not play this game')
+
+    def points_for(self, name: str) -> float:
+        return 0.5 if self.winning_side is None else (1.0 if self.winning_ai == name else 0.0)
 
     def to_row(self) -> dict:
         return {
-            "game_id": self.game_id,
-            "opening_seed": self.opening_seed,
-            "ai_side0": self.ai_side0,
-            "ai_side1": self.ai_side1,
-            "winner_side": self.winning_side if self.winning_side is not None else "draw",
-            "winner_ai": self.winning_ai,
-            "total_plies": self.total_plies,
-            "avg_move_ms": round(self.avg_ms, 3),
-            "total_bfs_calls": self.total_bfs,
-            "total_evaluations": self.total_evaluations,
-            "total_search_nodes": self.total_nodes,
-            "timeouts": self.timeouts,
+            'game_id': self.game_id, 'matchup': self.matchup,
+            'opening_seed': self.opening_seed,
+            'ai_side0': self.ai_side0, 'ai_side1': self.ai_side1,
+            'winner_side': 'draw' if self.winning_side is None else self.winning_side,
+            'winner_ai': self.winning_ai, 'finish_reason': self.finish_reason,
+            'fault_side': '' if self.fault_side is None else self.fault_side,
+            'margin_side0': self.margin_side0,
+            'margin_side1': -self.margin_side0,
+            'total_plies': self.total_plies,
+            'avg_move_ms': round(self.avg_ms, 4),
+            'total_bfs_calls': self.total_bfs,
+            'total_evaluations': self.total_evaluations,
+            'total_search_nodes': self.total_nodes,
+            'timed_search_moves': self.timed_search_moves,
         }
 
 
+def performance_score(results: list[MatchResult], agent: str) -> dict:
+    """PDF metric: 0.7*WR + 0.3*(mean margin + 1)/2.
+
+    Win=1, draw=0.5, loss=0. Margin is symmetric for each game.
+    This is NOT the search evaluation used to choose an action.
+    """
+    games = [r for r in results if agent in (r.ai_side0, r.ai_side1)]
+    if not games:
+        raise ValueError(f'No games for {agent}')
+    wins = sum(r.winning_ai == agent for r in games)
+    losses = sum(r.winning_ai not in ('draw', agent) for r in games)
+    draws = len(games) - wins - losses
+    wr = (wins + .5 * draws) / len(games)
+    avg_margin = sum(r.margin_for(agent) for r in games) / len(games)
+    smargin = (1.0 + avg_margin) / 2.0
+    score = 0.7 * wr + 0.3 * smargin
+    return dict(games=len(games), wins=wins, losses=losses, draws=draws,
+                win_rate=wr, average_margin=avg_margin,
+                margin_score=smargin, score=score,
+                forfeit_wins=sum(r.finish_reason == 'time_forfeit' and
+                                 r.winning_ai == agent for r in games),
+                forfeit_losses=sum(r.finish_reason == 'time_forfeit' and
+                                   r.winning_ai != agent for r in games))
+
+
 def random_opening(seed: int, num_plies: int = 4) -> State:
-    """Diversify starting positions; the two games in a pair share one opening."""
+    """Generate one reproducible legal opening; it is reused with sides swapped."""
+    if num_plies < 0:
+        raise ValueError('num_plies must be nonnegative')
     rng = random.Random(seed)
     s = start_state()
     rules = Rules()
@@ -68,162 +121,164 @@ def random_opening(seed: int, num_plies: int = 4) -> State:
         if winner(s) is not None:
             break
         actions = rules.legal_actions(s, wall_margin=2)
-        pawns = [a for a in actions if a.kind == "pawn"]
-        walls = [a for a in actions if a.kind == "wall"]
-        pool = walls if walls and rng.random() < 0.35 else pawns
+        pawns = [a for a in actions if a.kind == 'pawn']
+        walls = [a for a in actions if a.kind == 'wall']
+        pool = walls if walls and rng.random() < .35 else pawns
         s = rules.apply(s, rng.choice(pool))
     return s
 
 
 def play(state: State, side0: Agent, side1: Agent,
          game_id: int, seed: int, max_plies: int,
-         name0: str, name1: str) -> tuple[MatchResult, list[dict]]:
+         name0: str, name1: str, hard_limit_s: Optional[float] = None,
+         matchup: str = '') -> tuple[MatchResult, list[dict]]:
+    """Play one game; exceeding hard_limit_s causes immediate time forfeit."""
+    if max_plies <= 0:
+        raise ValueError('max_plies must be positive')
+    if hard_limit_s is not None and hard_limit_s <= 0:
+        raise ValueError('hard_limit_s must be positive')
     agents = [side0, side1]
+    names = [name0, name1]
     referee = Rules()
-    log: list[dict] = []
-    game_start_turn = state.turn
+    rows: list[dict] = []
+    outcome, reason, fault = winner(state), 'goal', None
     for ply in range(max_plies):
         if winner(state) is not None:
             break
         side = state.turn
         choice = agents[side].choose(state)
-        nxt = referee.apply(state, choice.action)  # Validates chosen action.
         st = choice.stats
-        log.append({
-            "game_id": game_id,
-            "opening_seed": seed,
-            "ply": ply + 1,
-            "side": side,
-            "agent": name0 if side == 0 else name1,
-            "action": str(choice.action),
-            "wall_margin": agents[side].options.wall_margin,
-            "root_top_k": agents[side].options.root_top_k,
-            "reply_top_k": agents[side].options.reply_top_k,
-            "search_depth": st.completed_depth,
-            "value": st.search_value,
-            "timed_out": int(st.timed_out),
-            "decision_ms": round(st.elapsed_ms, 3),
-            "nodes": st.nodes,
-            "leaves": st.leaves,
-            "evaluations": st.evaluations,
-            "bfs_calls": st.bfs_calls,
-            "wall_checks": st.wall_checks,
-            "cutoffs": st.cutoffs,
+        time_forfeit = (hard_limit_s is not None and
+                        st.elapsed_ms > hard_limit_s * 1000)
+        next_state = state if time_forfeit else referee.apply(state, choice.action)
+        rows.append({
+            'game_id': game_id, 'matchup': matchup,
+            'opening_seed': seed, 'ply': ply + 1,
+            'side': side, 'agent': names[side], 'action': str(choice.action),
+            'applied': int(not time_forfeit), 'hard_limit_exceeded': int(time_forfeit),
+            'decision_ms': round(st.elapsed_ms, 4),
+            'search_depth': st.completed_depth, 'target_depth': MODES[names[side]][0],
+            'timed_out': int(st.timed_out), 'value': st.search_value,
+            'nodes': st.nodes, 'leaves': st.leaves,
+            'evaluations': st.evaluations, 'bfs_calls': st.bfs_calls,
+            'wall_checks': st.wall_checks, 'cutoffs': st.cutoffs,
+            'mcts_iterations': st.mcts_iterations,
+            'root_top_k': agents[side].options.root_top_k,
+            'reply_top_k': agents[side].options.reply_top_k,
+            'wall_margin': agents[side].options.wall_margin,
         })
-        state = nxt
-    w = winner(state)
-    match = MatchResult(
-        game_id=game_id,
-        opening_seed=seed,
-        ai_side0=name0,
-        ai_side1=name1,
-        winning_side=w,
-        total_plies=len(log),
-        avg_ms=sum(x["decision_ms"] for x in log) / max(1, len(log)),
-        total_bfs=sum(x["bfs_calls"] for x in log),
-        total_evaluations=sum(x["evaluations"] for x in log),
-        total_nodes=sum(x["nodes"] for x in log),
-        timeouts=sum(x["timed_out"] for x in log),
-    )
-    return match, log
+        if time_forfeit:
+            outcome, reason, fault = 1 - side, 'time_forfeit', side
+            break
+        state = next_state
+        outcome = winner(state)
+        if outcome is not None:
+            reason = 'goal'
+            break
+    else:
+        outcome, reason = None, 'max_plies_draw'
+    if outcome is None and reason == 'goal':
+        reason = 'max_plies_draw'
+    completed_moves = sum(row['applied'] for row in rows)
+    result = MatchResult(
+        game_id=game_id, opening_seed=seed, ai_side0=name0, ai_side1=name1,
+        winning_side=outcome, total_plies=completed_moves,
+        end_state=state, finish_reason=reason, fault_side=fault,
+        avg_ms=sum(row['decision_ms'] for row in rows) / max(1, len(rows)),
+        total_bfs=sum(row['bfs_calls'] for row in rows),
+        total_evaluations=sum(row['evaluations'] for row in rows),
+        total_nodes=sum(row['nodes'] for row in rows),
+        timed_search_moves=sum(row['timed_out'] for row in rows), matchup=matchup)
+    return result, rows
 
 
 def run_tournament(a: Options, b: Options, pairs: int = 2,
                    seed: int = 42, opening_plies: int = 4,
-                   max_plies: int = 100):
+                   max_plies: int = 200, hard_limit_s: Optional[float] = None,
+                   game_offset: int = 0, quiet: bool = False):
     if pairs < 1:
-        raise ValueError("pairs must be positive")
-    results: list[MatchResult] = []
-    moves = []
+        raise ValueError('pairs must be positive')
+    results, move_rows = [], []
+    matchup = f'{a.mode}_vs_{b.mode}'
     for pair in range(pairs):
         opening_seed = seed + pair
         opening = random_opening(opening_seed, opening_plies)
-        # Keep the opening state FIXED while swapping the two algorithms' sides.
         for swapped in (False, True):
             first, second = (a, b) if not swapped else (b, a)
-            game_id = pair * 2 + 1 + int(swapped)
-            match, log = play(opening, Agent(first), Agent(second), game_id,
-                              opening_seed, max_plies, first.mode, second.mode)
-            results.append(match)
-            moves.extend(log)
-            print(f"game {game_id:03d}: {first.mode} (side0) vs {second.mode} "
-                  f"(side1) => {match.winning_ai}; plies={match.total_plies}, "
-                  f"avg={match.avg_ms:.1f}ms")
-    return results, moves
+            game_id = game_offset + 2 * pair + 1 + int(swapped)
+            result, moves = play(opening, Agent(first), Agent(second), game_id,
+                                 opening_seed, max_plies, first.mode, second.mode,
+                                 hard_limit_s=hard_limit_s, matchup=matchup)
+            results.append(result)
+            move_rows.extend(moves)
+            if not quiet:
+                print(f'{matchup} game {game_id:03d}: winner {result.winning_ai}; '
+                      f'{result.finish_reason}; plies={result.total_plies}; '
+                      f'avg={result.avg_ms:.1f}ms', flush=True)
+    return results, move_rows
 
 
-def write_csv(path: Path, data: list[dict]):
+def write_csv(path: Path, rows: list[dict]):
     path.parent.mkdir(parents=True, exist_ok=True)
-    if not data:
+    if not rows:
+        path.write_text('', encoding='utf-8')
         return
-    with path.open("w", newline="", encoding="utf-8-sig") as f:
-        writer = csv.DictWriter(f, fieldnames=list(data[0]))
+    with path.open('w', newline='', encoding='utf-8-sig') as f:
+        writer = csv.DictWriter(f, fieldnames=list(rows[0]))
         writer.writeheader()
-        writer.writerows(data)
+        writer.writerows(rows)
 
 
-def summary(results: list[MatchResult], rows: list[dict], names: tuple[str, str]) -> str:
-    win_counts = Counter(r.winning_ai for r in results)
-    out = [f"Total: {len(results)} games; draws: {win_counts['draw']}"]
+def summary(results: list[MatchResult], moves: list[dict], names: tuple[str, ...]) -> str:
+    out = [f'Total games={len(results)}, draws={sum(r.winning_side is None for r in results)}']
     for name in dict.fromkeys(names):
-        wins = win_counts[name]
-        draws = win_counts["draw"]
-        n = len(results)
-        # Score rate counts an experimental draw as 0.5.
-        rate = (wins + 0.5 * draws) / n if n else 0
-        rows_for = [r for r in rows if r["agent"] == name]
-        avg_ms = sum(r["decision_ms"] for r in rows_for) / max(1, len(rows_for))
-        avg_bfs = sum(r["bfs_calls"] for r in rows_for) / max(1, len(rows_for))
-        avg_nodes = sum(r["nodes"] for r in rows_for) / max(1, len(rows_for))
-        out.append(f"{name}: W {wins}, score rate {rate:.1%}, "
-                   f"mean move {avg_ms:.1f} ms, mean BFS {avg_bfs:.1f}, "
-                   f"mean nodes {avg_nodes:.1f}")
-    return "\n".join(out)
-
-
-def parse_args():
-    p = argparse.ArgumentParser(description=__doc__,
-                                formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--a", choices=tuple(MODES), default="minimax2")
-    p.add_argument("--b", choices=tuple(MODES), default="minimax2_ab")
-    p.add_argument("--pairs", type=int, default=2, help="number of paired openings")
-    p.add_argument("--seed", type=int, default=42)
-    p.add_argument("--opening-plies", type=int, default=4)
-    p.add_argument("--max-plies", type=int, default=80)
-    p.add_argument("--root-k", type=int, default=8)
-    p.add_argument("--reply-k", type=int, default=None,
-                   help="optional intermediate beam size; same for A and B")
-    p.add_argument("--margin", type=int, default=2,
-                   help="wall anchors within Chebyshev distance of either pawn")
-    p.add_argument("--all-walls", action="store_true",
-                   help="consider every wall anchor (slow)")
-    p.add_argument("--time-limit", type=float, default=None,
-                   help="soft per-move time budget in seconds (e.g. 0.2)")
-    p.add_argument("--iterative", action="store_true",
-                   help="search depth 1..D and keep last completed depth")
-    p.add_argument("--output", type=Path, default=Path("results"))
-    return p.parse_args()
+        p = performance_score(results, name)
+        own_moves = [r for r in moves if r['agent'] == name]
+        avg_ms = sum(r['decision_ms'] for r in own_moves) / max(1, len(own_moves))
+        avg_depth = sum(r['search_depth'] for r in own_moves) / max(1, len(own_moves))
+        out.append(f'{name}: W/L/D={p["wins"]}/{p["losses"]}/{p["draws"]}; '
+                   f'WR={p["win_rate"]:.3f}; mean_margin={p["average_margin"]:.3f}; '
+                   f'Score={p["score"]:.3f}; mean_ms={avg_ms:.1f}; '
+                   f'mean_completed_depth={avg_depth:.2f}')
+    return '\n'.join(out)
 
 
 def main():
-    args = parse_args()
-    if args.opening_plies < 0 or args.max_plies < 1:
-        raise ValueError("opening-plies must be >=0 and max-plies >0")
+    p = argparse.ArgumentParser(description=__doc__)
+    p.add_argument('--a', choices=tuple(MODES), default='minimax2')
+    p.add_argument('--b', choices=tuple(MODES), default='minimax2_ab')
+    p.add_argument('--pairs', type=int, default=2)
+    p.add_argument('--seed', type=int, default=42)
+    p.add_argument('--opening-plies', type=int, default=4)
+    p.add_argument('--max-plies', type=int, default=200)
+    p.add_argument('--root-k', type=int, default=8)
+    p.add_argument('--reply-k', type=int, default=4)
+    p.add_argument('--margin', type=int, default=2)
+    p.add_argument('--all-walls', action='store_true')
+    p.add_argument('--time-limit', type=float, default=None,
+                   help='search budget (s); enables iterative deepening')
+    p.add_argument('--hard-limit', type=float, default=None,
+                   help='per-move actual-time forfeit threshold (s)')
+    p.add_argument('--output', type=Path, default=Path('results/pair'))
+    args = p.parse_args()
+    if args.a == args.b:
+        p.error('Two distinct agent modes are required')
+    if args.time_limit is not None and args.hard_limit is not None and args.hard_limit < args.time_limit:
+        p.error('hard-limit must be >= time-limit')
     common = dict(root_top_k=args.root_k, reply_top_k=args.reply_k,
                   wall_margin=None if args.all_walls else args.margin,
                   time_limit_s=args.time_limit,
-                  iterative_deepening=args.iterative)
-    a = Options(mode=args.a, **common)
-    b = Options(mode=args.b, **common)
-    results, moves = run_tournament(a, b, args.pairs, args.seed,
-                                    args.opening_plies, args.max_plies)
-    write_csv(args.output / "games.csv", [r.to_row() for r in results])
-    write_csv(args.output / "moves.csv", moves)
+                  iterative_deepening=args.time_limit is not None)
+    results, moves = run_tournament(Options(args.a, **common),
+                                    Options(args.b, **common),
+                                    args.pairs, args.seed, args.opening_plies,
+                                    args.max_plies, args.hard_limit)
+    write_csv(args.output / 'games.csv', [r.to_row() for r in results])
+    write_csv(args.output / 'moves.csv', moves)
     report = summary(results, moves, (args.a, args.b))
-    (args.output / "summary.txt").write_text(report + "\n", encoding="utf-8")
-    print("\n" + report)
-    print(f"\nCSV saved in {args.output.resolve()}")
+    (args.output / 'summary.txt').write_text(report + '\n', encoding='utf-8')
+    print(report)
 
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     main()

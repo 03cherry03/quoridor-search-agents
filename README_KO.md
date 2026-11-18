@@ -1,148 +1,144 @@
-# 쿼리도 AI 입문 프로젝트 — 실행 가능한 최종 코드
+# Quoridor Search Agents
 
-**Greedy → Minimax(깊이 2) → Minimax + 알파–베타(깊이 2) → Minimax + 알파–베타(깊이 3)** 비교 실험을 위한 Python 프로젝트입니다.
+**인공지능입문 프로젝트 | BFS + Greedy 기반 탐색 알고리즘 비교 및 쿼리도 AI 리그전**
 
-**중요:** 이 패키지는 제공된 설명을 바탕으로 **독립적으로 작성·테스트한 9×9 게임 엔진과 탐색 AI**입니다. 웹사이트의 기존 `Game_hub/quoridor/server/ai.py`, `game.py`를 수정하거나 서버에 배포한 것이 아닙니다. 기존 코드의 실제 인터페이스를 가져오지 못했기 때문에 **웹게임 연동은 별도 검증**이 필요합니다. 연결할 때는 `server_adapter_example.py`를 참고하세요.
+9×9 쿼리도에서 BFS 최단거리 기반 평가 함수를 공통으로 사용하고, Minimax·Alpha-Beta·탐색 깊이에 따른 **실제 경기력과 탐색 효율**을 비교합니다. 팀원과 합의한 *평가방법 및 평가함수.pdf*를 반영한 업데이트 버전입니다.
 
-## 파일 설명
+> **주의:** 이것은 독립 실행형 Python 게임 엔진 + AI 실험 코드입니다. 팀원 웹게임 서버에 직접 합친 버전이 아닙니다. 서버 연동은 `server_adapter_example.py`를 참고하되 실제 API/좌표 규칙 확인이 필요합니다.
 
-| 파일 | 내용 |
-|---|---|
-| `quoridor_engine.py` | 9×9 게임 규칙, 말 이동과 점프, 벽 합법성 검사, BFS, 불변 상태 |
-| `quoridor_ai.py` | Greedy, Minimax, α–β, 깊이 제한, 후보 정렬/상위 k, 탐색 통계, 선택적 시간제한 |
-| `experiment.py` | 자동 AI 대전: 동일한 시작 상태를 사용하고 선후공을 바꿔 대국, CSV 저장 |
-| `benchmark_ab.py` | 동일한 판에서 일반 Minimax와 α–β의 **수/점수 동일성**을 검증하고 계산량 비교 |
-| `play_cli.py` | 터미널에서 직접 AI와 대결할 수 있는 게임 |
-| `server_adapter_example.py` | JSON 상태 입력과 행동 결과 출력의 서버 연결 경계 예시 |
-| `tests/test_project.py` | 규칙·탐색 검증 단위 테스트 12개 |
-| `example_results/` | 작은 실행 확인용 CSV 예시(결과 해석에 주의) |
+## 비교 대상
 
-**외부 라이브러리가 필요 없습니다.** Python 3.10+를 권장합니다.
+| 번호 | 실행 모드 | 구성 | 리그전 |
+|:--:|---|---|:--:|
+| ① | `greedy` | BFS + Greedy (기준선) | 기본 제외 |
+| ② | `minimax2` | Greedy 후보 정렬 + Minimax 깊이 2 | ✅ |
+| ③ | `minimax3` | Greedy 후보 정렬 + Minimax 깊이 3 | ✅ |
+| ④ | `minimax2_ab` | Minimax 깊이 2 + Alpha-Beta | ✅ |
+| ⑤ | `minimax3_ab` | Minimax 깊이 3 + Alpha-Beta | ✅ |
+| ⑥ | `mcts` | **선택적 실험용** heuristic-guided MCTS/UCT | 옵션 |
 
-## 1. 실행
+- 깊이는 **ply**, 즉 한 플레이어의 행동 한 번을 의미합니다.
+- 모든 Minimax 변형은 **동일한 평가 함수 / 합법적 행동 규칙 / 후보 범위 / top-k**를 사용합니다.
+- 상위 `k`개 선택은 Greedy 기반 **beam 근사**이고, Alpha-Beta 가지치기와는 다릅니다.
+- ⑥은 수업 외 알고리즘의 **임시 후보**입니다. 신경망 학습이나 AlphaZero가 아닙니다.
 
-이 폴더에서 터미널(PowerShell/명령 프롬프트)을 열고:
+## 빠른 시작
+
+Python 3.10 이상, 별도 패키지 설치 불필요. 아래 명령은 **레포 루트**에서 실행하세요. Windows에서 `python`이 안 되면 `py`를 사용해도 됩니다.
 
 ```bash
 python -m unittest discover -s tests -v
-python play_cli.py --ai minimax2_ab --human-side 0
 ```
 
-Windows에서 `python` 명령이 안 되면 `py`를 사용하세요.
-
-게임 직접 플레이 시 좌표는 0부터 시작하며 `p 1 4`(말 이동), `w 3 4 h`(가로 벽), `w 2 5 v`(세로 벽)처럼 입력합니다. `quit`을 입력하면 종료합니다.
-
-## 2. 가장 중요한 실험: Minimax vs Minimax + α–β
-
-먼저 **같은 판에서 같은 수를 선택하는지** 확인하세요. 아래 명령은 기본 12개의 판 상태를 만들고 일치성을 검사한 뒤 CSV로 저장합니다.
+### 1) 예비 실험: 0.2초에 깊이 3까지 도달하는지 확인
 
 ```bash
-python benchmark_ab.py --cases 12 --output results/ab_verification.csv
+python pilot_budget.py --cases 20 --budgets 0.2 0.5 1.0 --output results/pilot
 ```
 
-그다음 대전을 진행합니다.
+`results/pilot/depth_summary.csv`에 알고리즘별 **완료 깊이·깊이 3 완료율·평균 시간**이 저장됩니다. `budget_choice.json`은 **②~⑤에 공통으로 적용할 시간 예산**을 제안합니다.
+
+- 두 깊이 3 모델 **모두** 표본 상태 중 75% 이상에서 깊이 3을 완료하는 **가장 짧은 후보 예산**을 선택합니다.
+- 해당 예산이 없으면 `recommended_budget_s: null`로 저장됩니다. **그대로 리그전에 자동 적용하지 않습니다.** `--budgets 0.5 1.0 2.0`으로 다시 시험하거나 모두에게 공통으로 `--root-k 5 --reply-k 3`처럼 분기 폭을 줄여 다시 시험하세요.
+- 실험에서 예산을 0.5초로 바꾸면 허용 한계도 **0.55초**로 함께 바꿉니다(초기 팀원 안은 0.2/0.25초). 실제로 더 깊게 봐야만 두 깊이의 차이를 검증할 수 있기 때문입니다.
+- 이 단계는 실험 설정 결정용 **pilot**이며 리그전 승률을 뜻하지 않습니다.
+
+- **0.2초를 유지하고 싶다면** 아래처럼 후보 수를 공통으로 줄여 예비 실험을 해볼 수 있습니다. 다만 원래보다 많은 행동을 배제하므로 근사 오차가 커집니다.
 
 ```bash
-python experiment.py --a minimax2 --b minimax2_ab --pairs 10 --max-plies 120 --output results/ab
+python pilot_budget.py --cases 20 --budgets 0.2 0.5 --root-k 4 --reply-k 2 --output results/pilot_small_beam
+python league.py --pilot-config results/pilot_small_beam/budget_choice.json --root-k 4 --reply-k 2 --pairs 10 --max-plies 200 --output results/league_small_beam
 ```
 
-각 시작 판마다 두 AI의 플레이어 색(선후공)을 바꿔 **2판씩** 진행합니다. `--pairs 10`이면 **총 20판**입니다. `--max-plies 120`에 도달하면 **실험상의 미종료(draw)** 로 처리합니다. 쿼리도의 공식 무승부 규칙이라고 주장하지 마세요.
+위의 두 번째 명령은 pilot에서 충분한 깊이 3 완료율을 확인한 경우에만 실행 가능합니다.
 
-다른 비교:
+### 2) 리그전: ②~⑤ 전체 맞대결 / Score로 순위
+
+먼저 소규모 확인:
 
 ```bash
-python experiment.py --a greedy --b minimax2 --pairs 10 --output results/greedy_vs_minimax
-python experiment.py --a minimax2_ab --b minimax3_ab --reply-k 4 --pairs 4 --output results/depth
+python league.py --pairs 1 --max-plies 20 --output results/league_smoke
 ```
 
-> 깊이 3은 계산량이 커질 수 있습니다. `--reply-k 4`는 **중간 노드에서 상대 후보를 상위 4개로 제한**하므로, 엄밀한 전체 트리 Minimax가 아니라 beam 근사입니다. 깊이 2는 최종 응수 노드에서 이 후보 제한을 적용하지 않습니다. 따라서 `C vs D` 대결은 깊이뿐 아니라 후보 제한 효과도 섞일 수 있습니다. 깊이 효과를 순수하게 비교하려면 `--reply-k`를 제거하고 **동일한 `--root-k`, `--margin`, 평가 함수**로 비교하세요(느릴 수 있음).
-
-출력은 `results/.../games.csv`, `moves.csv`, `summary.txt` 세 파일입니다. Excel로 CSV를 열어 바로 표·그래프를 만들 수 있어요.
-
-## 3. 알고리즘 정의
-
-평가 함수 (검색 중 root player `me` 관점):
-
-```
-score = 10 * (opponent_BFS_distance - my_BFS_distance)
-        + 0.5 * (my_remaining_walls - opponent_remaining_walls)
-```
-
-승리 시 +10000, 패배 시 −10000입니다. BFS 거리는 **설치된 벽만 고려**하며 상대 말 점유/점프는 제외합니다. 거리의 엣지 비용은 모두 1이므로 BFS를 사용합니다.
-
-| 모드 | 깊이(ply) | 상대 응수 고려 | 알파–베타 |
-|---|---:|---|---|
-| `greedy` | 1 | X | X |
-| `minimax2` | 2 | O | X |
-| `minimax2_ab` | 2 | O | O |
-| `minimax3_ab` | 3 | O | O |
-
-`--root-k 8`에서는 첫 행동들을 즉시 평가해서 상위 8개만 Minimax로 확인합니다. 이것은 **후보 제한(beam approximation)**이지 알파–베타 가지치기가 아닙니다. `--root-k`와 `--margin`을 같게 둬야 `minimax2`와 `minimax2_ab`를 공정하게 비교할 수 있습니다.
-
-**속도 개선 포인트:** 말 이동을 먼저 검사하고 벽 후보는 *lazy generator*로 생성합니다. 탐색 중 `beta <= alpha`가 되면 뒤쪽 벽 후보는 **벽 합법성 BFS도 수행하지 않으므로** 시간 절감이 큽니다. 반대로 모든 벽을 미리 BFS로 검사하여 리스트로 만드는 구조라면 가지치기를 해도 리스트 구성 비용이 남습니다.
-
-### 측정 항목
-
-- `nodes`: 트리 탐색으로 들어간 자식 노드 수(루트 제외).
-- `leaves`: 깊이 0 또는 종료 노드 수.
-- `evaluations`: 점수 함수 호출 수. 루트 상위 k개 선별용 평가도 포함.
-- `bfs_calls`: **캐시 미스**로 실제 수행한 BFS 탐색 횟수(거리 계산·벽 경로검사 포함).
-- `wall_checks`: 경로 검사까지 들어간 벽 설치 시도 횟수.
-- `cutoffs`: 알파–베타로 중단한 지점 수.
-- `decision_ms`: 실제 전체 판단 시간, 후보 생성 및 BFS 포함.
-- `search_depth`: 해당 수에서 **완료된** 탐색 깊이.
-- `timed_out`: 시간제한에 걸려 덜 깊은 판단/합법적인 말 이동으로 대응했는지.
-
-## 4. 선택적 시간제한 실험 (0.2초)
+팀원 평가 방식 기준의 본 실험 (시간제한 0.2초 / 허용 한계 0.25초):
 
 ```bash
-python experiment.py --a minimax2_ab --b minimax3_ab --pairs 3 --reply-k 4 --time-limit 0.2 --iterative --output results/timeout
+python league.py --pairs 10 --max-plies 200 --time-limit 0.2 --hard-limit 0.25 --output results/league
 ```
 
-시간제한이 있으면 반복 심화 탐색을 사용해 **완료한 깊이의 수만** 선택합니다. 시간이 너무 짧아 루트 후보 생성조차 완료하지 못하면 합법적인 말 이동으로 폴백합니다. Python 루프에서 시간 확인을 수행하는 **소프트 제한**이므로 OS 수준의 절대적인 0.2초 보장은 아닙니다. 정식 실험에서는 `timed_out`과 `search_depth`를 반드시 같이 보세요.
-
-## 5. 웹서버에 연동하기 위한 체크리스트
-
-`server_adapter_example.py`를 실행하면 다음처럼 **입력 상태 → AI 행동**이 나옵니다.
+**예비 실험에서 결정한 시간 예산을 반영**하려면 대신 다음처럼 실행:
 
 ```bash
-python server_adapter_example.py
-# or
-python server_adapter_example.py saved_state.json minimax2_ab
+python league.py --pilot-config results/pilot/budget_choice.json --pairs 10 --max-plies 200 --output results/league_pilot
 ```
 
-필요한 입력 데이터 모양은 다음과 같습니다.
+`--pilot-config`를 사용하면 파일의 시간 예산/허용 한계를 읽고, 분기 설정(`--root-k`, `--reply-k`, `--margin`)이 pilot과 같은지 검사합니다. pilot에서 분기 설정을 변경했다면 league에도 동일하게 지정해야 합니다.
 
-```json
-{
-  "pawns": [[0, 4], [8, 4]],
-  "horizontal_walls": [],
-  "vertical_walls": [],
-  "remaining": [10, 10],
-  "turn": 0
-}
+⑥ MCTS 참가를 결정하면 `--include-mcts`를 추가합니다. 기본은 **②~⑤ 네 AI의 6개 대진**이고, MCTS 포함 시 **5개 AI의 10개 대진**입니다. 대진별로 시작 판을 고정하고 선후공을 바꾸어 2판씩 진행하므로 `--pairs 10`은 각각 **120판 / 200판**입니다. 단순한 최대 ply 종료는 프로젝트 실험용 무승부 규칙으로 취급합니다.
+
+**결과 파일:** `results/league/standings.csv`, `head_to_head.csv`, `games.csv`, `moves.csv`, `summary.md`, `config.json`.
+
+### 3) 별도 실험: 시간제한 **없이** 동일 깊이 Minimax vs Alpha-Beta
+
+```bash
+python benchmark_ab.py --cases 12 --depths 2 3 --output results/fixed_depth/ab_verification.csv
 ```
 
-`Action.as_dict()`의 결과는 예를 들어 말 이동 `{"type":"move", "row":1, "col":4}` 또는 벽 설치 `{"type":"wall", "row":3, "col":4, "orientation":"h"}`입니다.
+이 실험은 리그전과 **완전히 별개**입니다. 깊이 2끼리(② vs ④), 깊이 3끼리(③ vs ⑤) 동일한 판에서 같은 수와 Minimax 평가값을 내는지 검증하며, **방문 노드·BFS 호출 수·실행 시간·가지치기 횟수**를 기록합니다. Alpha-Beta는 같은 탐색 트리에서 최종 값/선택을 유지하지만 **실행 시간이 반드시 더 짧은 것은 아닙니다**(후보 생성/정렬 비용 때문).
 
-기존 사이트 `game.py`와 연결할 때 확인할 요소:
+### 4) 기본 모델과 대결하거나 직접 플레이
 
-1. **좌표**: `(row, col)`가 0부터 시작하고 선공 말은 `(0,4)`인지, UI 방향은 일치하는지.
-2. **벽 정보**: 기준점은 8×8 anchor로 H는 아래쪽 두 행을 막는 벽, V는 옆쪽 두 열을 막는 벽인지. 원래 서버는 다른 좌표를 사용할 수 있습니다.
-3. **남은 벽, 현재 플레이어**, 서버가 기대하는 **행동 JSON 타입·필드명**, 타임아웃 처리.
-4. 기존 서버의 합법성 검사와 이 엔진의 결과가 일치하는지 **샘플 대국별로 테스트**.
-5. 서버는 업데이트 전 기존 `server/ai.py`를 백업하고, 연결 코드에서만 `choose_project_ai`를 호출하도록 만드는 편이 안전합니다.
+```bash
+# ① Greedy vs ② Minimax: 기본 모델과의 상대 성능
+python experiment.py --a greedy --b minimax2 --pairs 10 --time-limit 0.2 --hard-limit 0.25 --output results/baseline
 
-**기존 웹사이트에서 바로 작동한다고 보증하는 드롭인 교체 파일은 아닙니다.** 원본 `ai.py`, `game.py`, 서버 라우팅 로직을 복사해서 대조하면 어댑터를 완성할 수 있습니다.
+# 터미널에서 직접 플레이
+python play_cli.py --ai minimax3_ab --time-limit 0.2
+```
 
-## 6. 보고서에 쓰기 좋은 비교
+## 팀원이 정한 평가 함수
 
-- **알고리즘 적절성:** 2인 완전 관측·결정적·턴제 게임에서 상대의 적대적인 행동을 가정하는 Minimax; BFS는 평가와 합법성 검사.
-- **실험 1:** Greedy와 Minimax2의 승률 비교 = 상대 응수 고려 여부.
-- **실험 2:** Minimax2와 Minimax2+AB의 선택 수/평가값 일치 검증, BFS 호출·시간 비교 = 가지치기 효율.
-- **실험 3 (확장):** 깊이 2와 3 비교 = 더 멀리 보되 비용 증가; 후보 제한의 영향 명시.
-- **한계:** 경로 기반 heuristic은 점프/교착·벽의 전략적 위치를 정확히 평가하지 못함, `top_k`는 최적 행동을 누락할 가능성, 0.2초 soft deadline.
+### AI가 탐색 중 사용하는 함수: `eval(s)`
 
-### 구현/실험 기록
+```text
+승리:       +(10000 + 남은 탐색 깊이 k)
+패배:       -(10000 + 남은 탐색 깊이 k)
+그 외:      (상대 BFS 거리 - 내 BFS 거리)
+            + 0.5 * (내 남은 벽 - 상대 남은 벽)
+            + tau
 
-구현 후 `python -m unittest discover -s tests -v`에서 총 12개 테스트를 통과했으며, A/B 대전을 1쌍(40 ply 제한 × 2판)으로 연동 실행하여 CSV 저장도 확인했습니다. **이 작은 샘플의 승률은 성능 결론으로 해석하지 마세요.**
+tau = +0.5 (내 차례) 또는 -0.5 (상대 차례)
+```
+
+BFS는 **벽만 장애물**로 보고 계산하며, 상대 말의 점유/점프를 최단거리 계산에 반영하지 않습니다. `wall_weight=0.5`는 PDF의 기본값이며 전체 참가 AI에 일관되게 적용합니다.
+
+### 리그전 종료 후 평가 점수: `Score(A)`
+
+```text
+WR(A)       = (승리 수 + 0.5 * 무승부 수) / 전체 경기 수
+margin_j    = 승리: +min(1, 진 사람의 남은 BFS 거리 / 8)
+              패배: -min(1, 내 남은 BFS 거리 / 8)
+              상대 시간 초과: +1 / 내 시간 초과: -1 / 최대 ply 무승부: 0
+S_margin(A) = (1 + 평균 margin) / 2
+Score(A)    = 0.7 * WR(A) + 0.3 * S_margin(A)
+```
+
+**시간제한 규칙:** 판단의 탐색 예산은 기본 **0.2초**. 실제 판단 시간이 **0.25초를 초과하면 그 수는 두지 않고 시간 초과 패배**로 처리합니다. 시간제한 탐색은 **Iterative Deepening**으로 깊이 1→2→3을 탐색하고, **마지막으로 완전히 완료한 깊이의 행동만 채택**합니다. 아무 깊이도 완료되지 않으면 안전한 합법 말 이동을 사용합니다. 이는 Python 내부 협력적 시간 확인이며 OS 수준의 선점형 실행 중단을 보장하지는 않습니다.
+
+최종 순위는 `Score`로 결정합니다. `standings.csv`에는 팀원이 제안한 **0.6/0.4와 0.8/0.2 가중치 민감도 평가 순위**, 평균 탐색 깊이, 실제 한 수 판단 시간, 탐색 노드 수, 초과율 및 **선후공 쌍 묶음 단위의 설명적 Bootstrap 95% 승률 구간**도 저장됩니다. 표본이 적으면 신뢰구간을 과도하게 해석하지 마세요.
+
+## 주요 코드
+
+| 파일 | 용도 |
+|---|---|
+| `quoridor_engine.py` | 쿼리도 규칙, BFS 최단거리, 벽 설치 합법성, 상태 직렬화 |
+| `quoridor_ai.py` | Greedy / Minimax 2·3 / Alpha-Beta / 선택적 MCTS, 공통 평가 함수, 시간제한 |
+| `pilot_budget.py` | 0.2·0.5·1초 실제 완료 깊이 예비 실험 및 공통 예산 제안 |
+| `league.py` | ②~⑤ 리그전, 선택적 ⑥, Score 순위표 / 신뢰구간 / CSV |
+| `experiment.py` | 두 AI의 선후공 교대 대전 + 종료 마진/시간 초과 규칙 |
+| `benchmark_ab.py` | **무제한 시간·고정 깊이** Minimax vs Alpha-Beta 정확성/효율 비교 |
+| `play_cli.py` | 터미널에서 AI와 게임 |
+| `server_adapter_example.py` | 기존 웹서버 연동 시 참고할 JSON 예시 (미검증) |
+| `tests/` | 규칙, 평가 점수, 타임아웃, 알고리즘 단위 테스트 |
+
+**주의할 해석:** 깊이 3이 실제로 완료되더라도 깊이 2와 **같은 수를 고르는 것 자체는 정상적인 결과**입니다. 또한 리그전에는 beam 근사가 포함되므로 전 게임 트리를 탐색하는 '완전한 Minimax'라고 주장하면 안 됩니다. MCTS의 `mcts_iterations`는 Minimax 깊이·노드 수와 동일한 의미가 아닙니다.
